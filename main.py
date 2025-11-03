@@ -8,7 +8,17 @@ logging.basicConfig(level=logging.INFO)
 
 # Авторизация Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
+import json
+from oauth2client.service_account import ServiceAccountCredentials
+import os
+
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
+# Читаем JSON из переменной окружения
+service_account_info = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+
+creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
+
 client = gspread.authorize(creds)
 sheet = client.open_by_key("1QvZOgpUlPxH2oKjx1S1s8qgfFkxl0RFP").worksheet("batches")
 
