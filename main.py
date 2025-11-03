@@ -15,7 +15,9 @@ import os
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
 # Читаем JSON из переменной окружения
-service_account_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT"])
+import base64
+service_account_info = json.loads(base64.b64decode(os.environ["GOOGLE_SERVICE_ACCOUNT_B64"]).decode("utf-8"))
+
 
 creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
 
