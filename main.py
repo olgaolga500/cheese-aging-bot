@@ -22,7 +22,7 @@ service_account_info = json.loads(base64.b64decode(os.environ["GOOGLE_SERVICE_AC
 creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
 
 client = gspread.authorize(creds)
-sheet = client.open_by_key("1QvZOgpUlPxH2oKjx1S1s8qgfFkxl0RFP").worksheet("batches")
+sheet = client.open_by_key("1QvZOgpUlPxH2oKjx1S1s8qgfFkxl0RFP").worksheet("Партии")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
