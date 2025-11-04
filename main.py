@@ -1,134 +1,174 @@
 import os
-import json
-import base64
 import logging
 from datetime import datetime
 
+from telegram import ReplyKeyboardMarkup, Update
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    MessageHandler,
+    Filters,
+    ConversationHandler,
+    CallbackContext,
+)
+
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-
-from aiogram import Bot, Dispatcher, executor, types
+import base64
+import json
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing")
-if not SPREADSHEET_ID:
-    raise RuntimeError("SPREADSHEET_ID is missing")
-
-# --- GOOGLE AUTH ---
-b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
-if not b64:
-    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_B64 is missing")
-
-try:
-    service_json = base64.b64decode(b64).decode("utf-8")
-    service_account_info = json.loads(service_json)
-except Exception as e:
-    raise RuntimeError("Failed to decode GOOGLE_SERVICE_ACCOUNT_B64: " + str(e))
-
-scope = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-
-creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
+# === Google Sheets Auth ===
+google_creds_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
+creds_json = json.loads(base64.b64decode(google_creds_b64))
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
 client = gspread.authorize(creds)
 
-batches = client.open_by_key(SPREADSHEET_ID).worksheet("Batches")
-sales = client.open_by_key(SPREADSHEET_ID).worksheet("Sales")
+SHEET_NAME = "Cheese"  # ← поменяй если нужно
+sheet = client.open(SHEET_NAME).sheet1
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
-
-# Временное хранилище выбора партии по пользователю
-user_state = {}
-
-
-def get_available_batches():
-    data = batches.get_all_records()
-    result = []
-    for row in data:
-        try:
-            rem = int(row["Remaining"])
-        except:
-            rem = 0
-        if rem > 0:
-            result.append(
-                f'{row["BatchID"]}: {row["Cheese"]} ({row["MilkType"]}) от {row["Date"]} — осталось {rem}'
-            )
-    return result
+(
+    RECORD_NAME,
+    RECORD_MILKTYPE,
+    RECORD_SIZE,
+    RECORD_COUNT,
+    WRITE_NAME,
+    WRITE_SIZE,
+    WRITE_COUNT
+) = range(7)
 
 
-@dp.message_handler(commands=["start"])
-async def start(message: types.Message):
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add("Списать сыр ✅")
-    await message.answer("Привет! Что делаем?", reply_markup=keyboard)
+def start(update: Update, context: CallbackContext):
+    keyboard = [
+        ["📥 Записать сыр"],
+        ["📤 Списать сыр"]
+    ]
+    update.message.reply_text(
+        "Выберите действие:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
 
 
-@dp.message_handler(lambda msg: msg.text == "Списать сыр ✅")
-async def choose_batch(message: types.Message):
-    options = get_available_batches()
-    if not options:
-        return await message.answer("Сыров для списания нет ✅")
-
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for opt in options:
-        keyboard.add(opt)
-    await message.answer("Выбери партию:", reply_markup=keyboard)
+# === ЗАПИСЬ СЫРА ===
+def record_start(update: Update, context: CallbackContext):
+    update.message.reply_text("Введите название сыра:")
+    return RECORD_NAME
 
 
-@dp.message_handler(lambda msg: ":" in msg.text and "осталось" in msg.text)
-async def ask_quantity(message: types.Message):
-    batch_id = message.text.split(":")[0].strip()
-    user_state[message.from_user.id] = batch_id
-    await message.answer("Сколько головок списать? ✏️")
+def record_name(update: Update, context: CallbackContext):
+    context.user_data["name"] = update.message.text
+
+    keyboard = [["коровье", "козье"], ["буйволиное", "смесь"]]
+    update.message.reply_text(
+        "Выберите тип молока:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return RECORD_MILKTYPE
 
 
-@dp.message_handler(lambda msg: msg.text.isdigit())
-async def record_sale(message: types.Message):
-    user_id = message.from_user.id
+def record_milktype(update: Update, context: CallbackContext):
+    context.user_data["milktype"] = update.message.text
 
-    if user_id not in user_state:
-        return  # Это не часть операции списания
+    keyboard = [["большая", "маленькая"]]
+    update.message.reply_text(
+        "Размер головки:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return RECORD_SIZE
 
-    qty = int(message.text)
-    batch_id = user_state[user_id]
 
-    records = batches.get_all_records()
-    for idx, row in enumerate(records):
-        if str(row["BatchID"]) == str(batch_id):
-            new_remaining = int(row["Remaining"]) - qty
-            if new_remaining < 0:
-                return await message.answer("Ошибка: списываем больше, чем есть ❌")
+def record_size(update: Update, context: CallbackContext):
+    context.user_data["size"] = update.message.text
+    update.message.reply_text("Количество (шт):")
+    return RECORD_COUNT
 
-            # Update Remaining (column F = 6)
-            batches.update_cell(idx + 2, 6, new_remaining)
-            break
 
-    sales.append_row([
-        datetime.now().strftime("%Y-%m-%d"),
-        batch_id,
-        qty,
-        "",  # Customer optional
-        message.from_user.username or message.from_user.full_name,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ])
+def record_count(update: Update, context: CallbackContext):
+    count = update.message.text.strip()
+    name = context.user_data["name"]
+    milktype = context.user_data["milktype"]
+    size = context.user_data["size"]
+    date = datetime.now().strftime("%d.%m.%Y")
 
-    del user_state[user_id]  # очищаем контекст
+    sheet.append_row([date, name, milktype, size, count, "записано"])
 
-    await message.answer("✅ Списание записано.\nОстатки обновлены.")
+    update.message.reply_text(f"✅ Записано: {name}, {size}, {count} шт.")
+    return ConversationHandler.END
+
+
+# === СПИСАНИЕ ===
+def write_start(update: Update, context: CallbackContext):
+    update.message.reply_text("Введите название сыра:")
+    return WRITE_NAME
+
+
+def write_name(update: Update, context: CallbackContext):
+    context.user_data["name"] = update.message.text
+
+    keyboard = [["большая", "маленькая"]]
+    update.message.reply_text(
+        "Размер головки:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return WRITE_SIZE
+
+
+def write_size(update: Update, context: CallbackContext):
+    context.user_data["size"] = update.message.text
+    update.message.reply_text("Количество (шт):")
+    return WRITE_COUNT
+
+
+def write_count(update: Update, context: CallbackContext):
+    count = update.message.text.strip()
+    name = context.user_data["name"]
+    size = context.user_data["size"]
+    date = datetime.now().strftime("%d.%m.%Y")
+
+    sheet.append_row([date, name, "-", size, count, "списано"])
+
+    update.message.reply_text(f"📤 Списано: {name}, {size}, {count} шт.")
+    return ConversationHandler.END
+
+
+def cancel(update: Update, context: CallbackContext):
+    update.message.reply_text("Отменено.")
+    return ConversationHandler.END
+
+
+def main():
+    updater = Updater(os.getenv("BOT_TOKEN"), use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+
+    dp.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(Filters.regex("📥 Записать сыр"), record_start)],
+        states={
+            RECORD_NAME: [MessageHandler(Filters.text & ~Filters.command, record_name)],
+            RECORD_MILKTYPE: [MessageHandler(Filters.text & ~Filters.command, record_milktype)],
+            RECORD_SIZE: [MessageHandler(Filters.text & ~Filters.command, record_size)],
+            RECORD_COUNT: [MessageHandler(Filters.text & ~Filters.command, record_count)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    ))
+
+    dp.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(Filters.regex("📤 Списать сыр"), write_start)],
+        states={
+            WRITE_NAME: [MessageHandler(Filters.text & ~Filters.command, write_name)],
+            WRITE_SIZE: [MessageHandler(Filters.text & ~Filters.command, write_size)],
+            WRITE_COUNT: [MessageHandler(Filters.text & ~Filters.command, write_count)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    ))
+
+    updater.start_polling()
+    updater.idle()
 
 
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
-
-
-
-if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
-
+    main()
