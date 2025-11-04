@@ -24,6 +24,8 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, s
 client = gspread.authorize(creds)
 sheet = client.open_by_key(os.environ["SPREADSHEET_ID"]).worksheet("Партии")
 
+print(client.open_by_key(os.environ["SPREADSHEET_ID"]).title)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Я бот управления созреванием сыра. Напиши /new чтобы добавить новую партию.")
 
