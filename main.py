@@ -1,8 +1,6 @@
 import os
-import logging
-from datetime import datetime
-from aiogram import Bot, Dispatcher, executor, types
-import gspread
+import json
+import base64
 from oauth2client.service_account import ServiceAccountCredentials
 
 logging.basicConfig(level=logging.INFO)
@@ -16,8 +14,23 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(
-    eval(os.getenv("GOOGLE_SERVICE_ACCOUNT")), scope
-)
+    scope = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+# Ожидаем, что в Variables у тебя есть GOOGLE_SERVICE_ACCOUNT_B64 (Base64 строка JSON)
+b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
+if not b64:
+    raise RuntimeError("Environment variable GOOGLE_SERVICE_ACCOUNT_B64 not found")
+
+# Декодируем base64 -> строка -> парсим JSON
+try:
+    service_json = base64.b64decode(b64).decode("utf-8")
+    service_account_info = json.loads(service_json)
+except Exception as e:
+    raise RuntimeError("Failed to decode or parse GOOGLE_SERVICE_ACCOUNT_B64: " + str(e))
+
+creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
 client = gspread.authorize(creds)
 
 batches = client.open_by_key(SPREADSHEET_ID).worksheet("Batches")
