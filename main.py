@@ -22,8 +22,7 @@ service_account_info = json.loads(base64.b64decode(os.environ["GOOGLE_SERVICE_AC
 creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
 
 client = gspread.authorize(creds)
-sheet = client.open_by_key("SPREADSHEET_ID").worksheet("Партии")
-
+sheet = client.open_by_key(os.environ["SPREADSHEET_ID"]).worksheet("Партии")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Я бот управления созреванием сыра. Напиши /new чтобы добавить новую партию.")
