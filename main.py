@@ -56,8 +56,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
    import os
 
-app = ApplicationBuilder().token(os.environ["BOT_TOKEN"]).build()
-
+    app = ApplicationBuilder().token(os.environ["BOT_TOKEN"]).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new_batch))
