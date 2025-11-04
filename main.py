@@ -126,19 +126,17 @@ async def write_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TG_TOKEN).build()
 
+    # Команды
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("subscribe", subscribe))
-    app.add_handler(MessageHandler(filters.Regex("^Мои задачи"), today_tasks))
-    app.add_handler(CallbackQueryHandler(mark_done, pattern="^done:"))
+    app.add_handler(CallbackQueryHandler(button))
 
-    # Ежедневные напоминания в 9:00 Монтенегро (UTC+1 зимой/UTC+2 летом)
-    app.job_queue.run_daily(send_daily_notifications, time=time(7, 0))  # 7:00 UTC → ~09:00 local
+    # Планировщик
+    job_queue = app.job_queue
+    job_queue.run_daily(send_daily_notifications, time=time(7, 0))  # 7:00 UTC → ~09:00 Черногория
 
+    print("Bot started")
     app.run_polling()
 
-
-if __name__ == "__main__":
-    main()
 
