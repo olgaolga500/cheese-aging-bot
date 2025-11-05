@@ -193,27 +193,43 @@ async def addbatch_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Тип партии (small — маленькие головки, big — одиночная нумерованная головка):", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
     return ADD_TYPE
 
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup(
+        [["Сварить сыр", "Списать сыр"], ["Задания на сегодня"]],
+        resize_keyboard=True
+    )
+
 async def addbatch_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     typ = update.message.text.strip().lower()
     if typ not in ("small", "big"):
         await update.message.reply_text("Выбери 'small' или 'big'.")
         return ADD_TYPE
+
     context.user_data["type"] = typ
+
+    # Если большая головка → спрашиваем номер
     if typ == "big":
         await update.message.reply_text("Введите номер головки (например: 14):")
         return ADD_HEAD
-    else:
-        # finalize
-        cheese = context.user_data.get("cheese")
-        milk = context.user_data.get("milk")
-        qty = context.user_data.get("qty")
-        batch_id = get_next_batch_id()
-        date_iso = date.today().strftime("%Y-%m-%d")
-        row = [batch_id, date_iso, cheese, milk, qty, qty, "", "small", "Active", ""]
-        batches_sheet.append_row(row)
-        await update.message.reply_text(f"Добавлена партия {cheese} ({milk}), {qty} шт. BatchID={batch_id}")
-        context.user_data.clear()
-        return ConversationHandler.END
+
+    # Если маленькие головки → сразу сохраняем
+    cheese = context.user_data.get("cheese")
+    milk = context.user_data.get("milk")
+    qty = context.user_data.get("qty")
+
+    batch_id = get_next_batch_id()
+    date_iso = date.today().strftime("%Y-%m-%d")
+    row = [batch_id, date_iso, cheese, milk, qty, qty, "", "small", "Active", ""]
+    batches_sheet.append_row(row)
+
+    await update.message.reply_text(
+        f"✅ Партия добавлена:\n\n{cheese} ({milk}) — {qty} шт.\nBatchID = {batch_id}",
+        reply_markup=main_menu_keyboard()
+    )
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
 
 async def addbatch_head(update: Update, context: ContextTypes.DEFAULT_TYPE):
     head = update.message.text.strip()
