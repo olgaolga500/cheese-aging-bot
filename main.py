@@ -1,9 +1,9 @@
-# main.py — финальный рабочий файл
+# main.py — финальная версия (полностью готовая)
 import os
 import json
 import base64
 import logging
-from datetime import datetime, date, time as dtime
+from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 import gspread
@@ -19,9 +19,9 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    ConversationHandler,
     CallbackQueryHandler,
     ContextTypes,
-    ConversationHandler,
     filters,
 )
 
@@ -49,134 +49,102 @@ except Exception as e:
 creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
 gc = gspread.authorize(creds)
 
-# worksheets
 wb = gc.open_by_key(SPREADSHEET_ID)
+# worksheets (must exist)
 batches_sheet = wb.worksheet("Batches")
 actions_sheet = wb.worksheet("Actions")
+cheese_sheet = wb.worksheet("Cheese-Recipes")
 sales_sheet = wb.worksheet("Sales")
-subscribers_sheet = wb.worksheet("Subscribers")
+subs_sheet = wb.worksheet("Subscribers")
 # ---------------------------------------
-
-# ---------- Utility helpers ----------
-def now_iso():
-    return datetime.now(ZoneInfo(PODGORICA_TZ)).strftime("%Y-%m-%d %H:%M:%S")
-
-def today_iso_date():
-    return date.today().strftime("%Y-%m-%d")
-
-def read_unique_cheeses():
-    try:
-        rows = batches_sheet.get_all_records()
-    except Exception:
-        return []
-    cheeses = []
-    for r in rows:
-        c = r.get("Cheese")
-        if c and c not in cheeses:
-            cheeses.append(c)
-    return cheeses
-
-def get_next_batch_id():
-    rows = batches_sheet.col_values(1)  # BatchID column
-    # skip header
-    numeric = []
-    for v in rows[1:]:
-        try:
-            numeric.append(int(v))
-        except Exception:
-            pass
-    return (max(numeric) + 1) if numeric else 1
-
-def add_subscriber(chat_id: int, name: str, role: str = "staff"):
-    try:
-        vals = subscribers_sheet.get_all_records()
-    except Exception:
-        vals = []
-    existing_ids = [str(r.get("ChatID")) for r in vals]
-    if str(chat_id) not in existing_ids:
-        subscribers_sheet.append_row([chat_id, name, role, "TRUE"])
-        logger.info(f"Added subscriber {name} ({chat_id})")
-
-def get_active_subscribers():
-    try:
-        recs = subscribers_sheet.get_all_records()
-    except Exception:
-        return []
-    result = []
-    for r in recs:
-        active = str(r.get("Active", "")).strip().lower()
-        if active in ("true", "yes", "1"):
-            result.append({"ChatID": r.get("ChatID"), "Name": r.get("Name")})
-    return result
-
-def format_task_row(row):
-    # row: dict from actions.get_all_records
-    # We will fetch Batch info to enrich display
-    batchid = row.get("BatchID")
-    action = row.get("Action", "")
-    # find batch details
-    try:
-        batches = batches_sheet.get_all_records()
-    except Exception:
-        batches = []
-    batch_info = None
-    for b in batches:
-        if str(b.get("BatchID")) == str(batchid):
-            batch_info = b
-            break
-    if batch_info:
-        cheese = batch_info.get("Cheese", "")
-        head = batch_info.get("HeadNumbers", "")
-        date_v = batch_info.get("Date", "")
-        if head:
-            title = f"{cheese} №{head} (партия {batchid})"
-        else:
-            title = f"{cheese} от {date_v} (партия {batchid})"
-    else:
-        title = f"Партия {batchid}"
-    return title, action
-# -------------------------------------
 
 # ---------- Conversation states ----------
 (ADD_CHEESE, ADD_MILK, ADD_QTY, ADD_TYPE, ADD_HEAD) = range(5)
 (SALE_MODE, SALE_HEAD, SALE_HEAD_QTY, SALE_CHEESE, SALE_MILK, SALE_DATE, SALE_PICK_BATCH, SALE_QTY) = range(100, 108)
 # -----------------------------------------
 
-# ---------- Handlers ----------
+# ---------- Helpers ----------
+def now_iso():
+    return datetime.now(ZoneInfo(PODGORICA_TZ)).strftime("%Y-%m-%d %H:%M:%S")
 
+def today_iso():
+    return date.today().strftime("%Y-%m-%d")
+
+def read_unique_cheeses():
+    # read first column of Cheese-Recipes (skip header)
+    vals = cheese_sheet.col_values(1)
+    res = []
+    for v in vals[1:]:
+        if v and v not in res:
+            res.append(v)
+    return res
+
+def get_next_batch_id():
+    col = batches_sheet.col_values(1)
+    nums = []
+    for v in col[1:]:
+        try:
+            nums.append(int(v))
+        except Exception:
+            continue
+    return max(nums) + 1 if nums else 1
+
+def get_active_subscribers():
+    try:
+        recs = subs_sheet.get_all_records()
+    except Exception:
+        return []
+    out = []
+    for r in recs:
+        active = str(r.get("Active", "")).strip().lower()
+        if active in ("true", "yes", "1"):
+            try:
+                out.append({"ChatID": int(r.get("ChatID")), "Name": r.get("Name")})
+            except Exception:
+                continue
+    return out
+
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup([["Сварить сыр", "Списать сыр"], ["Задания на сегодня"]], resize_keyboard=True)
+# -------------------------------------
+
+# ---------- Handlers ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    name = user.username or f"{user.first_name or ''} {user.last_name or ''}".strip()
-    add_subscriber(update.effective_chat.id, name)
-    keyboard = [["Добавить партию"], ["Списать сыр"], ["Мои задачи на сегодня"]]
-    await update.message.reply_text("Привет! Ты подписан на уведомления. Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    name = user.username or (user.first_name or "") + (" " + user.last_name if user.last_name else "")
+    # add to subscribers if not present
+    try:
+        recs = subs_sheet.get_all_records()
+    except Exception:
+        recs = []
+    ids = [str(r.get("ChatID")) for r in recs]
+    if str(update.effective_chat.id) not in ids:
+        try:
+            subs_sheet.append_row([update.effective_chat.id, name, "staff", "TRUE"])
+        except Exception:
+            logger.exception("Failed to add subscriber")
+    await update.message.reply_text("Привет! Выбери действие:", reply_markup=main_menu_keyboard())
 
-
-# -------- Add Batch flow ----------
+# ---- Add batch flow ----
 async def addbatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cheeses = read_unique_cheeses()
-    keyboard = []
-    for c in cheeses:
-        keyboard.append([c])
-    keyboard.append(["+ Ввести вручную"])
-    await update.message.reply_text("Выберите сыр из списка или нажмите '+ Ввести вручную':", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    if not cheeses:
+        await update.message.reply_text("Список сыров пуст. Пожалуйста, добавь сыры в лист Cheese-Recipes и попробуй снова.", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    kb = [[c] for c in cheeses]
+    await update.message.reply_text("Выберите сыр (берётся из Cheese-Recipes):", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     return ADD_CHEESE
 
 async def addbatch_cheese(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if text == "+ Ввести вручную":
-        await update.message.reply_text("Введи название нового сыра (пример: Камамбер буйволиный):")
-        # user will type name -> handle as ADD_CHEESE
-        return ADD_CHEESE
-    else:
-        context.user_data["cheese"] = text
-        keyboard = [["коровье", "козье"], ["буйволиное", "смесь"]]
-        await update.message.reply_text("Выберите тип молока:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
-        return ADD_MILK
+    context.user_data["cheese"] = text
+    kb = [["коровье", "козье"], ["буйволиное", "смесь"]]
+    await update.message.reply_text("Выберите тип молока:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    return ADD_MILK
 
 async def addbatch_milk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["milk"] = update.message.text.strip()
-    await update.message.reply_text("Сколько головок? (в штуках, целое число):")
+    await update.message.reply_text("Сколько головок? (целое число):")
     return ADD_QTY
 
 async def addbatch_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,66 +154,59 @@ async def addbatch_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if qty <= 0:
             raise ValueError()
     except Exception:
-        await update.message.reply_text("Пожалуйста, введи целое положительное число для количества.")
+        await update.message.reply_text("Введи целое положительное число.")
         return ADD_QTY
     context.user_data["qty"] = qty
-    keyboard = [["small", "big"]]
-    await update.message.reply_text("Тип партии (small — маленькие головки, big — одиночная нумерованная головка):", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("Тип партии: small или big", reply_markup=ReplyKeyboardMarkup([["small","big"]], resize_keyboard=True))
     return ADD_TYPE
-
-def main_menu_keyboard():
-    return ReplyKeyboardMarkup(
-        [["Сварить сыр", "Списать сыр"], ["Задания на сегодня"]],
-        resize_keyboard=True
-    )
 
 async def addbatch_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     typ = update.message.text.strip().lower()
     if typ not in ("small", "big"):
         await update.message.reply_text("Выбери 'small' или 'big'.")
         return ADD_TYPE
-
     context.user_data["type"] = typ
-
-    # Если большая головка → спрашиваем номер
     if typ == "big":
-        await update.message.reply_text("Введите номер головки (например: 14):")
+        await update.message.reply_text("Введите номер головки (пример: 14):")
         return ADD_HEAD
-
-    # Если маленькие головки → сразу сохраняем
+    # small — finalize
     cheese = context.user_data.get("cheese")
     milk = context.user_data.get("milk")
     qty = context.user_data.get("qty")
-
     batch_id = get_next_batch_id()
-    date_iso = date.today().strftime("%Y-%m-%d")
+    date_iso = today_iso()
     row = [batch_id, date_iso, cheese, milk, qty, qty, "", "small", "Active", ""]
-    batches_sheet.append_row(row)
-
-    await update.message.reply_text(
-        f"✅ Партия добавлена:\n\n{cheese} ({milk}) — {qty} шт.\nBatchID = {batch_id}",
-        reply_markup=main_menu_keyboard()
-    )
-
+    try:
+        batches_sheet.append_row(row)
+    except Exception:
+        logger.exception("Failed to append batch")
+        await update.message.reply_text("Ошибка при записи партии в таблицу.", reply_markup=main_menu_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
+    await update.message.reply_text(f"✅ Партия добавлена: {cheese} ({milk}) — {qty} шт.\nBatchID = {batch_id}", reply_markup=main_menu_keyboard())
     context.user_data.clear()
     return ConversationHandler.END
-
 
 async def addbatch_head(update: Update, context: ContextTypes.DEFAULT_TYPE):
     head = update.message.text.strip()
-    # accept as string
     cheese = context.user_data.get("cheese")
     milk = context.user_data.get("milk")
     qty = context.user_data.get("qty")
     batch_id = get_next_batch_id()
-    date_iso = date.today().strftime("%Y-%m-%d")
+    date_iso = today_iso()
     row = [batch_id, date_iso, cheese, milk, qty, qty, head, "big", "Active", ""]
-    batches_sheet.append_row(row)
-    await update.message.reply_text(f"Добавлена большая головка {cheese} №{head}. BatchID={batch_id}")
+    try:
+        batches_sheet.append_row(row)
+    except Exception:
+        logger.exception("Failed to append big batch")
+        await update.message.reply_text("Ошибка при записи партии.", reply_markup=main_menu_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
+    await update.message.reply_text(f"✅ Добавлена большая головка: {cheese} №{head}\nBatchID = {batch_id}", reply_markup=main_menu_keyboard())
     context.user_data.clear()
     return ConversationHandler.END
 
-# -------- Sale flow ----------
+# ---- Sale flow ----
 async def sale_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["По номеру головки"], ["По партии (дата + молоко)"]]
     await update.message.reply_text("Как списываем?", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
@@ -257,10 +218,9 @@ async def sale_mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введи номер головки (например: 14):")
         return SALE_HEAD
     else:
-        # choose cheese
         cheeses = read_unique_cheeses()
         if not cheeses:
-            await update.message.reply_text("Нет доступных сыров в базе.")
+            await update.message.reply_text("Нет доступных сыров в базе.", reply_markup=main_menu_keyboard())
             return ConversationHandler.END
         kb = [[c] for c in cheeses]
         await update.message.reply_text("Выберите сыр:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
@@ -269,7 +229,6 @@ async def sale_mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def sale_by_head(update: Update, context: ContextTypes.DEFAULT_TYPE):
     head = update.message.text.strip()
     context.user_data["head"] = head
-    # find batch where HeadNumbers contains head
     rows = batches_sheet.get_all_records()
     target = None
     for r in rows:
@@ -278,7 +237,7 @@ async def sale_by_head(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target = r
             break
     if not target:
-        await update.message.reply_text("Не нашёл партию с таким номером головки.")
+        await update.message.reply_text("Не нашёл партию с таким номером головки.", reply_markup=main_menu_keyboard())
         return ConversationHandler.END
     context.user_data["batchid"] = target.get("BatchID")
     await update.message.reply_text("Сколько головок списать? (обычно 1):")
@@ -291,11 +250,16 @@ async def sale_by_head_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введи целое число.")
         return SALE_HEAD_QTY
     batchid = context.user_data.get("batchid")
-    # append to Sales: SaleDate | BatchID | Qty (pcs) | Customer | Who | Timestamp
-    sdate = date.today().strftime("%Y-%m-%d")
-    who = update.effective_user.username or update.effective_user.full_name
-    sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
-    await update.message.reply_text(f"Записано в Sales: Batch {batchid} — {qty} шт.")
+    sdate = today_iso()
+    who = update.effective_user.username or (update.effective_user.full_name or "")
+    try:
+        sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
+    except Exception:
+        logger.exception("Failed to append sale")
+        await update.message.reply_text("Ошибка при записи в Sales.", reply_markup=main_menu_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
+    await update.message.reply_text(f"Записано в Sales: Batch {batchid} — {qty} шт.", reply_markup=main_menu_keyboard())
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -313,20 +277,16 @@ async def sale_choose_milk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sale_choose_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dt = update.message.text.strip()
-    # validate ISO date
     try:
-        # simple check
         datetime.strptime(dt, "%Y-%m-%d")
     except Exception:
         await update.message.reply_text("Неверный формат даты. Используй YYYY-MM-DD.")
         return SALE_DATE
     context.user_data["date"] = dt
-    # find matching batches
     rows = batches_sheet.get_all_records()
     candidates = []
     for r in rows:
         if str(r.get("Cheese")) == str(context.user_data["cheese"]) and str(r.get("MilkType")) == str(context.user_data["milk"]) and str(r.get("Date")) == dt:
-            # include only with Remaining >0
             try:
                 rem = int(r.get("Remaining") or 0)
             except Exception:
@@ -334,22 +294,18 @@ async def sale_choose_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if rem > 0:
                 candidates.append(r)
     if not candidates:
-        await update.message.reply_text("Не найдено партий по этим параметрам с остатком >0.")
+        await update.message.reply_text("Не найдено партий по этим параметрам с остатком >0.", reply_markup=main_menu_keyboard())
         return ConversationHandler.END
-    # show options
-    kb = [[f'Batch {c.get("BatchID")} — осталось {c.get("Remaining")}']] 
-    # use first candidate if multiple? better list them
     kb = [[f'Batch {c.get("BatchID")} — осталось {c.get("Remaining")}'] for c in candidates]
     await update.message.reply_text("Выберите партию:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     return SALE_PICK_BATCH
 
 async def sale_pick_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
-    # extract BatchID
     try:
         bid = int(txt.split()[1])
     except Exception:
-        await update.message.reply_text("Не понял выбор. Нажми на строку с Batch ...")
+        await update.message.reply_text("Не понял выбор. Нажми на строку с Batch ...", reply_markup=main_menu_keyboard())
         return ConversationHandler.END
     context.user_data["batchid"] = bid
     await update.message.reply_text("Количество головок для списания (шт):")
@@ -362,139 +318,147 @@ async def sale_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введи целое число.")
         return SALE_QTY
     batchid = context.user_data.get("batchid")
-    sdate = date.today().strftime("%Y-%m-%d")
-    who = update.effective_user.username or update.effective_user.full_name
-    sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
-    await update.message.reply_text(f"Записано в Sales: Batch {batchid} — {qty} шт.")
+    sdate = today_iso()
+    who = update.effective_user.username or (update.effective_user.full_name or "")
+    try:
+        sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
+    except Exception:
+        logger.exception("Failed to append sale")
+        await update.message.reply_text("Ошибка при записи в Sales.", reply_markup=main_menu_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
+    await update.message.reply_text(f"Записано в Sales: Batch {batchid} — {qty} шт.", reply_markup=main_menu_keyboard())
     context.user_data.clear()
     return ConversationHandler.END
 
-# -------- Today tasks and Done callback ----------
-async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
-    # get today's actions where Done empty
+# ---- Actions / Today / Done ----
+def format_task_row_enriched(r):
+    # r is dict from actions_sheet.get_all_records
+    batchid = r.get("BatchID")
+    # try get batch info
+    try:
+        batches = batches_sheet.get_all_records()
+    except Exception:
+        batches = []
+    title = f"Партия {batchid}"
+    for b in batches:
+        if str(b.get("BatchID")) == str(batchid):
+            cheese = b.get("Cheese", "")
+            head = b.get("HeadNumbers", "")
+            d = b.get("Date", "")
+            if head:
+                title = f"{cheese} №{head} (партия {batchid})"
+            else:
+                title = f"{cheese} от {d} (партия {batchid})"
+            break
+    action_text = r.get("Action", "")
+    return title, action_text
+
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         rows = actions_sheet.get_all_records()
     except Exception:
+        await update.message.reply_text("Ошибка чтения Actions.", reply_markup=main_menu_keyboard())
         return
-    today = date.today().strftime("%Y-%m-%d")
+    today = today_iso()
     tasks = []
-    row_indices = []
-    raw = actions_sheet.get_all_values()  # for row indexing
-    # iterate records with index mapping to sheet row number (header row is 1)
     for idx, r in enumerate(rows, start=2):
         if str(r.get("ActionDate")) == today and not r.get("Done"):
             tasks.append((idx, r))
     if not tasks:
-        # optional: notify subscribers there's nothing
-        subs = get_active_subscribers()
-        for s in subs:
-            try:
-                await context.bot.send_message(chat_id=int(s["ChatID"]), text="На сегодня нет задач по Actions. Хорошего дня!")
-            except Exception:
-                pass
+        await update.message.reply_text("На сегодня нет задач.", reply_markup=main_menu_keyboard())
+        return
+    for idx, r in tasks:
+        title, action_text = format_task_row_enriched(r)
+        text = f"🧀 {title}\n— {action_text}"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done", callback_data=f"done:{idx}")]])
+        await update.message.reply_text(text, reply_markup=kb)
+
+async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        rows = actions_sheet.get_all_records()
+    except Exception:
+        return
+    today = today_iso()
+    tasks = []
+    for idx, r in enumerate(rows, start=2):
+        if str(r.get("ActionDate")) == today and not r.get("Done"):
+            tasks.append((idx, r))
+    if not tasks:
         return
     subs = get_active_subscribers()
     for s in subs:
-        cid = int(s["ChatID"])
+        cid = s["ChatID"]
         for idx, r in tasks:
-            title, action_text = format_task_row(r)
+            title, action_text = format_task_row_enriched(r)
             text = f"🧀 {title}\n— {action_text}"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done", callback_data=f"done:{idx}")]])
             try:
                 await context.bot.send_message(chat_id=cid, text=text, reply_markup=kb)
             except Exception:
-                pass
-
-async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # user asked to see today's tasks
-    try:
-        rows = actions_sheet.get_all_records()
-    except Exception:
-        await update.message.reply_text("Ошибка чтения Actions.")
-        return
-    today = date.today().strftime("%Y-%m-%d")
-    tasks = []
-    for idx, r in enumerate(rows, start=2):
-        if str(r.get("ActionDate")) == today and not r.get("Done"):
-            tasks.append((idx, r))
-    if not tasks:
-        await update.message.reply_text("На сегодня нет задач.")
-        return
-    for idx, r in tasks:
-        title, action_text = format_task_row(r)
-        text = f"🧀 {title}\n— {action_text}"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done", callback_data=f"done:{idx}")]])
-        await update.message.reply_text(text, reply_markup=kb)
+                logger.exception("Failed to send daily message to " + str(cid))
 
 async def callback_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # done:{row}
+    data = query.data
     try:
         row_idx = int(data.split(":")[1])
     except Exception:
-        await query.edit_message_text("Неверный формат callback.")
+        await query.edit_message_text("Неверный callback.")
         return
     user = query.from_user
-    who = user.username or f"{user.first_name or ''} {user.last_name or ''}".strip()
+    who = user.username or (user.first_name or "")
     ts = now_iso()
-    # write to actions_sheet columns: Done (col 4), Who (col5), Timestamp (col6)
     try:
-        actions_sheet.update_cell(row_idx, 4, "YES")
-        actions_sheet.update_cell(row_idx, 5, who)
-        actions_sheet.update_cell(row_idx, 6, ts)
-    except Exception as e:
-        logger.exception("Failed to mark done: " + str(e))
-        await query.edit_message_text("Ошибка при записи статуса.")
+        actions_sheet.update_cell(row_idx, 4, "YES")   # Done col
+        actions_sheet.update_cell(row_idx, 5, who)    # Who col
+        actions_sheet.update_cell(row_idx, 6, ts)     # Timestamp col
+    except Exception:
+        logger.exception("Failed to write done to Actions")
+        await query.edit_message_text("Ошибка записи статуса.")
         return
-    # get row content to include in broadcast
-    row = actions_sheet.row_values(row_idx)
-    # columns: BatchID(1), ActionDate(2), Action(3), Done(4), Who(5), Timestamp(6)
-    batchid = row[0] if len(row) >= 1 else ""
-    action_text = row[2] if len(row) >= 3 else ""
-    # try to get batch info to format message
+    # read row to build broadcast
+    try:
+        row_vals = actions_sheet.row_values(row_idx)
+    except Exception:
+        row_vals = []
+    batchid = row_vals[0] if len(row_vals) >= 1 else ""
+    action_text = row_vals[2] if len(row_vals) >= 3 else ""
+    # try get batch info for title
     try:
         batch_recs = batches_sheet.get_all_records()
     except Exception:
         batch_recs = []
-    batch_info = None
+    title = f"Партия {batchid}"
     for b in batch_recs:
         if str(b.get("BatchID")) == str(batchid):
-            batch_info = b
+            cheese = b.get("Cheese", "")
+            head = b.get("HeadNumbers", "")
+            d = b.get("Date", "")
+            if head:
+                title = f"{cheese} №{head} (партия {batchid})"
+            else:
+                title = f"{cheese} от {d} (партия {batchid})"
             break
-    if batch_info:
-        cheese = batch_info.get("Cheese", "")
-        head = batch_info.get("HeadNumbers", "")
-        date_v = batch_info.get("Date", "")
-        if head:
-            title = f"{cheese} №{head} (партия {batchid})"
-        else:
-            title = f"{cheese} от {date_v} (партия {batchid})"
-    else:
-        title = f"Партия {batchid}"
-    broadcast_text = f"✅ {who} выполнил:\n{title}\n— {action_text}"
-    # broadcast to all active subscribers
+    broadcast = f"✅ {who} выполнил:\n{title}\n— {action_text}"
     subs = get_active_subscribers()
     for s in subs:
         try:
-            await context.bot.send_message(chat_id=int(s["ChatID"]), text=broadcast_text)
+            await context.bot.send_message(chat_id=s["ChatID"], text=broadcast)
         except Exception:
-            pass
-    # edit original message to show done
+            logger.exception("Failed to broadcast done to " + str(s.get("ChatID")))
     try:
         await query.edit_message_text(f"✅ Выполнено ({who})\n{title}\n— {action_text}")
     except Exception:
         pass
 
-# ---------- Build application ----------
+# ---------- Build and run ----------
 def build_app():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Handlers
-    app.add_handler(CommandHandler("start", cmd_start))
-    # add batch conversation
-    add_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^(Добавить партию)$"), addbatch_start), CommandHandler("addbatch", addbatch_start)],
+    addbatch_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^Сварить сыр$"), addbatch_start), CommandHandler("addbatch", addbatch_start)],
         states={
             ADD_CHEESE: [MessageHandler(filters.TEXT & ~filters.COMMAND, addbatch_cheese)],
             ADD_MILK: [MessageHandler(filters.TEXT & ~filters.COMMAND, addbatch_milk)],
@@ -502,14 +466,12 @@ def build_app():
             ADD_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, addbatch_type)],
             ADD_HEAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, addbatch_head)],
         },
-        fallbacks=[MessageHandler(filters.Regex("^Отмена$"), lambda u, c: ConversationHandler.END)],
+        fallbacks=[CommandHandler("start", cmd_start)],
         allow_reentry=True,
     )
-    app.add_handler(add_conv)
 
-    # sale conversation
     sale_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^(Списать сыр)$"), sale_start), CommandHandler("sale", sale_start)],
+        entry_points=[MessageHandler(filters.Regex("^Списать сыр$"), sale_start), CommandHandler("sale", sale_start)],
         states={
             SALE_MODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_mode_choice)],
             SALE_HEAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_by_head)],
@@ -520,21 +482,19 @@ def build_app():
             SALE_PICK_BATCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_pick_batch)],
             SALE_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_qty)],
         },
-        fallbacks=[MessageHandler(filters.Regex("^Отмена$"), lambda u, c: ConversationHandler.END)],
+        fallbacks=[CommandHandler("start", cmd_start)],
         allow_reentry=True,
     )
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(addbatch_conv)
     app.add_handler(sale_conv)
-
-    # today tasks commands
-    app.add_handler(MessageHandler(filters.Regex("^(Мои задачи на сегодня)$"), cmd_today))
+    app.add_handler(MessageHandler(filters.Regex("^Задания на сегодня$"), cmd_today))
     app.add_handler(CommandHandler("today", cmd_today))
-
-    # callback for Done
     app.add_handler(CallbackQueryHandler(callback_done, pattern="^done:"))
 
-    # schedule daily job at 09:00 Europe/Podgorica
+    # schedule daily job at 09:00 in Podgorica
     tz = ZoneInfo(PODGORICA_TZ)
-    # 09:00 local Podgorica
     run_time = dtime(9, 0, tzinfo=tz)
     app.job_queue.run_daily(send_daily_notifications, time=run_time)
 
