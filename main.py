@@ -493,18 +493,18 @@ def build_app():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CallbackQueryHandler(callback_done, pattern="^done:"))
 
-    # schedule daily job at 09:00 in Podgorica
-tz = ZoneInfo(PODGORICA_TZ)
-run_time = dtime(9, 0)
+        # schedule daily job at 09:00 in Podgorica
+    tz = ZoneInfo(PODGORICA_TZ)
+    run_time = dtime(9, 0)
 
-app.job_queue.run_daily(
-    send_daily_notifications,
-    time=run_time,
-    timezone=tz,
-    days=(0, 1, 2, 3, 4, 5, 6)  # каждый день
-)
+    app.job_queue.run_daily(
+        send_daily_notifications,
+        time=run_time,
+        timezone=tz,
+        days=(0, 1, 2, 3, 4, 5, 6)  # каждый день
+    )
 
-return app
+    return app
 
 
 def main():
