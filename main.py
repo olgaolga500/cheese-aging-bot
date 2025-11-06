@@ -529,14 +529,13 @@ def build_app():
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("check", lambda update, context: ContextTypes.DEFAULT_TYPE))  # placeholder, replaced below
     app.add_handler(addbatch_conv)
     app.add_handler(sale_conv)
     app.add_handler(MessageHandler(filters.Regex("^Задания на сегодня$"), cmd_today))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CallbackQueryHandler(callback_done, pattern="^done:"))
 
-    # replace placeholder: proper /check handler
+    # /check handler to manually trigger notifications (useful for testing)
     async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Запускаю проверку и рассылку заданий (тест)...")
         await send_daily_notifications(context)
@@ -545,15 +544,16 @@ def build_app():
 
     # schedule daily job at 09:00 in Podgorica
     tz = ZoneInfo(PODGORICA_TZ)
-    run_time = dtime(9, 0)
+    run_time = dtime(9, 0, tzinfo=tz)
 
+    # PTB v20+ expects tzinfo inside time(...) and doesn't accept timezone= kw
     app.job_queue.run_daily(
         send_daily_notifications,
         time=run_time,
-        timezone=tz,
         days=(0, 1, 2, 3, 4, 5, 6)  # каждый день
     )
 
+    logger.info(f"Scheduled daily job at {run_time} ({PODGORICA_TZ})")
     return app
 
 
