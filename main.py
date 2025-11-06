@@ -1,4 +1,4 @@
-# main.py — финальная версия (с кешированием чтений от Google Sheets)
+# main.py — финальная версия (с кешированием чтений от Google Sheets) + генератором Actions
 import os
 import json
 import base64
@@ -57,6 +57,8 @@ actions_sheet = wb.worksheet("Actions")
 cheese_sheet = wb.worksheet("Cheese-Recipes")
 sales_sheet = wb.worksheet("Sales")
 subs_sheet = wb.worksheet("Subscribers")
+# Schedules sheet is required for action generation
+schedules_sheet = wb.worksheet("Schedules")
 # ---------------------------------------
 
 # ---------- Simple sheet read-cache ----------
@@ -149,6 +151,83 @@ def is_done_value(v):
         return False
     sval = str(v).strip().lower()
     return sval in ("true", "yes", "1", "y", "done")
+# -------------------------------------
+
+# ---------- Action generation helper ----------
+def generate_actions_for_batch(batch_id, batch_date_iso, cheese_name):
+    """
+    Generate rows in Actions for a given batch using Cheese-Recipes -> ScheduleID -> Schedules.
+    Writes rows: [BatchID, ActionDate (YYYY-MM-DD), Action, FALSE, "", ""]
+    Also sets Batches.ActionsCreated = TRUE (10th column) for that BatchID row.
+    """
+    try:
+        # parse batch date
+        try:
+            base_date = datetime.strptime(batch_date_iso, "%Y-%m-%d").date()
+        except Exception:
+            # if ISO with time, try full parse
+            base_date = datetime.fromisoformat(batch_date_iso).date()
+
+        # find schedule IDs for this cheese from Cheese-Recipes
+        cheese_recs = cached_get_all_records(cheese_sheet)
+        schedule_ids = set()
+        for r in cheese_recs:
+            if str(r.get("Cheese")) == str(cheese_name):
+                sid = r.get("ScheduleID")
+                if sid is not None and str(sid).strip() != "":
+                    schedule_ids.add(str(sid).strip())
+
+        if not schedule_ids:
+            logger.info(f"No ScheduleID for cheese '{cheese_name}', skipping action generation.")
+            return
+
+        # read schedules
+        sched_recs = cached_get_all_records(schedules_sheet)
+        added = 0
+        for s in sched_recs:
+            sid = str(s.get("ScheduleID") or "").strip()
+            if sid in schedule_ids:
+                day_raw = s.get("Day")
+                action_text = s.get("Action") or ""
+                try:
+                    days = int(day_raw)
+                except Exception:
+                    # skip non-integer Day entries
+                    continue
+                action_date = base_date + timedelta(days=days)
+                action_date_iso = action_date.isoformat()
+                # append action row
+                try:
+                    actions_sheet.append_row([batch_id, action_date_iso, action_text, "FALSE", "", ""])
+                    added += 1
+                except Exception:
+                    logger.exception("Failed to append action row for batch " + str(batch_id))
+
+        if added:
+            invalidate_sheet_cache(actions_sheet)
+            # mark Batches.ActionsCreated column = TRUE
+            try:
+                col = batches_sheet.col_values(1)
+                row_idx = None
+                for i, v in enumerate(col, start=1):
+                    try:
+                        if str(int(v)) == str(batch_id):
+                            row_idx = i
+                            break
+                    except Exception:
+                        if str(v) == str(batch_id):
+                            row_idx = i
+                            break
+                if row_idx:
+                    # ActionsCreated is 10th column per your header
+                    batches_sheet.update_cell(row_idx, 10, "TRUE")
+                    invalidate_sheet_cache(batches_sheet)
+            except Exception:
+                logger.exception("Failed to mark ActionsCreated for batch " + str(batch_id))
+
+        logger.info(f"Generated {added} actions for batch {batch_id} (cheese={cheese_name}).")
+    except Exception:
+        logger.exception("Exception in generate_actions_for_batch")
 
 # -------------------------------------
 
@@ -224,6 +303,8 @@ async def addbatch_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         batches_sheet.append_row(row)
         invalidate_sheet_cache(batches_sheet)
+        # generate actions immediately
+        generate_actions_for_batch(batch_id, date_iso, cheese)
     except Exception:
         logger.exception("Failed to append batch")
         await update.message.reply_text("Ошибка при записи партии в таблицу.", reply_markup=main_menu_keyboard())
@@ -244,6 +325,8 @@ async def addbatch_head(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         batches_sheet.append_row(row)
         invalidate_sheet_cache(batches_sheet)
+        # generate actions for this big head
+        generate_actions_for_batch(batch_id, date_iso, cheese)
     except Exception:
         logger.exception("Failed to append big batch")
         await update.message.reply_text("Ошибка при записи партии.", reply_markup=main_menu_keyboard())
@@ -570,7 +653,6 @@ def build_app():
 
     logger.info(f"Scheduled daily job at {run_time} ({PODGORICA_TZ})")
     return app
-
 
 def main():
     app = build_app()
