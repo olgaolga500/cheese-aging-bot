@@ -1,8 +1,9 @@
-# main.py — финальная версия (полностью готовая)
+# main.py — финальная версия (с кешированием чтений от Google Sheets)
 import os
 import json
 import base64
 import logging
+import time as _time
 from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -58,6 +59,33 @@ sales_sheet = wb.worksheet("Sales")
 subs_sheet = wb.worksheet("Subscribers")
 # ---------------------------------------
 
+# ---------- Simple sheet read-cache ----------
+# cache structure: { sheet_title: (timestamp, data) }
+SHEET_RECORDS_CACHE = {}
+CACHE_TTL_SECONDS = 5  # small TTL to avoid bursts, adjust if needed
+
+def cached_get_all_records(sheet_obj, ttl_seconds=CACHE_TTL_SECONDS):
+    title = sheet_obj.title
+    now = _time.time()
+    entry = SHEET_RECORDS_CACHE.get(title)
+    if entry:
+        ts, data = entry
+        if now - ts < ttl_seconds:
+            return data
+    # fetch fresh
+    data = sheet_obj.get_all_records()
+    SHEET_RECORDS_CACHE[title] = (now, data)
+    return data
+
+def invalidate_sheet_cache_by_title(sheet_title):
+    if sheet_title in SHEET_RECORDS_CACHE:
+        SHEET_RECORDS_CACHE.pop(sheet_title, None)
+
+def invalidate_sheet_cache(sheet_obj):
+    invalidate_sheet_cache_by_title(sheet_obj.title)
+
+# ---------------------------------------------
+
 # ---------- Conversation states ----------
 (ADD_CHEESE, ADD_MILK, ADD_QTY, ADD_TYPE, ADD_HEAD) = range(5)
 (SALE_MODE, SALE_HEAD, SALE_HEAD_QTY, SALE_CHEESE, SALE_MILK, SALE_DATE, SALE_PICK_BATCH, SALE_QTY) = range(100, 108)
@@ -68,18 +96,28 @@ def now_iso():
     return datetime.now(ZoneInfo(PODGORICA_TZ)).strftime("%Y-%m-%d %H:%M:%S")
 
 def today_iso():
-    return date.today().strftime("%Y-%m-%d")
+    # use Podgorica local date
+    return datetime.now(ZoneInfo(PODGORICA_TZ)).date().isoformat()
 
 def read_unique_cheeses():
-    # read first column of Cheese-Recipes (skip header)
-    vals = cheese_sheet.col_values(1)
+    vals = cached_get_all_records(cheese_sheet)
     res = []
-    for v in vals[1:]:
+    # vals are list of dicts; but original code used col_values — support both possibilities:
+    if vals and isinstance(vals, list) and isinstance(vals[0], dict):
+        for r in vals:
+            v = r.get("Cheese") if isinstance(r, dict) else None
+            if v and v not in res:
+                res.append(v)
+        return res
+    # fallback: read first column from sheet directly (rare)
+    col = cheese_sheet.col_values(1)
+    for v in col[1:]:
         if v and v not in res:
             res.append(v)
     return res
 
 def get_next_batch_id():
+    # faster to use col_values; low-frequency operation
     col = batches_sheet.col_values(1)
     nums = []
     for v in col[1:]:
@@ -90,10 +128,7 @@ def get_next_batch_id():
     return max(nums) + 1 if nums else 1
 
 def get_active_subscribers():
-    try:
-        recs = subs_sheet.get_all_records()
-    except Exception:
-        return []
+    recs = cached_get_all_records(subs_sheet)
     out = []
     for r in recs:
         active = str(r.get("Active", "")).strip().lower()
@@ -114,13 +149,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = user.username or (user.first_name or "") + (" " + user.last_name if user.last_name else "")
     # add to subscribers if not present
     try:
-        recs = subs_sheet.get_all_records()
+        recs = cached_get_all_records(subs_sheet)
     except Exception:
         recs = []
     ids = [str(r.get("ChatID")) for r in recs]
     if str(update.effective_chat.id) not in ids:
         try:
             subs_sheet.append_row([update.effective_chat.id, name, "staff", "TRUE"])
+            invalidate_sheet_cache(subs_sheet)
         except Exception:
             logger.exception("Failed to add subscriber")
     await update.message.reply_text("Привет! Выбери действие:", reply_markup=main_menu_keyboard())
@@ -178,6 +214,7 @@ async def addbatch_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row = [batch_id, date_iso, cheese, milk, qty, qty, "", "small", "Active", ""]
     try:
         batches_sheet.append_row(row)
+        invalidate_sheet_cache(batches_sheet)
     except Exception:
         logger.exception("Failed to append batch")
         await update.message.reply_text("Ошибка при записи партии в таблицу.", reply_markup=main_menu_keyboard())
@@ -197,6 +234,7 @@ async def addbatch_head(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row = [batch_id, date_iso, cheese, milk, qty, qty, head, "big", "Active", ""]
     try:
         batches_sheet.append_row(row)
+        invalidate_sheet_cache(batches_sheet)
     except Exception:
         logger.exception("Failed to append big batch")
         await update.message.reply_text("Ошибка при записи партии.", reply_markup=main_menu_keyboard())
@@ -229,7 +267,7 @@ async def sale_mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def sale_by_head(update: Update, context: ContextTypes.DEFAULT_TYPE):
     head = update.message.text.strip()
     context.user_data["head"] = head
-    rows = batches_sheet.get_all_records()
+    rows = cached_get_all_records(batches_sheet)
     target = None
     for r in rows:
         hn = str(r.get("HeadNumbers") or "").strip()
@@ -254,6 +292,8 @@ async def sale_by_head_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     who = update.effective_user.username or (update.effective_user.full_name or "")
     try:
         sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
+        invalidate_sheet_cache(sales_sheet)
+        invalidate_sheet_cache(batches_sheet)  # because Sales script may change Remaining
     except Exception:
         logger.exception("Failed to append sale")
         await update.message.reply_text("Ошибка при записи в Sales.", reply_markup=main_menu_keyboard())
@@ -283,7 +323,7 @@ async def sale_choose_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Неверный формат даты. Используй YYYY-MM-DD.")
         return SALE_DATE
     context.user_data["date"] = dt
-    rows = batches_sheet.get_all_records()
+    rows = cached_get_all_records(batches_sheet)
     candidates = []
     for r in rows:
         if str(r.get("Cheese")) == str(context.user_data["cheese"]) and str(r.get("MilkType")) == str(context.user_data["milk"]) and str(r.get("Date")) == dt:
@@ -322,6 +362,8 @@ async def sale_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     who = update.effective_user.username or (update.effective_user.full_name or "")
     try:
         sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
+        invalidate_sheet_cache(sales_sheet)
+        invalidate_sheet_cache(batches_sheet)
     except Exception:
         logger.exception("Failed to append sale")
         await update.message.reply_text("Ошибка при записи в Sales.", reply_markup=main_menu_keyboard())
@@ -332,16 +374,13 @@ async def sale_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ---- Actions / Today / Done ----
-def format_task_row_enriched(r):
+def format_task_row_enriched(r, batches_cache=None):
     # r is dict from actions_sheet.get_all_records
     batchid = r.get("BatchID")
-    # try get batch info
-    try:
-        batches = batches_sheet.get_all_records()
-    except Exception:
-        batches = []
     title = f"Партия {batchid}"
-    for b in batches:
+    if batches_cache is None:
+        batches_cache = cached_get_all_records(batches_sheet)
+    for b in batches_cache:
         if str(b.get("BatchID")) == str(batchid):
             cheese = b.get("Cheese", "")
             head = b.get("HeadNumbers", "")
@@ -356,7 +395,7 @@ def format_task_row_enriched(r):
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        rows = actions_sheet.get_all_records()
+        rows = cached_get_all_records(actions_sheet)
     except Exception:
         await update.message.reply_text("Ошибка чтения Actions.", reply_markup=main_menu_keyboard())
         return
@@ -368,15 +407,16 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tasks:
         await update.message.reply_text("На сегодня нет задач.", reply_markup=main_menu_keyboard())
         return
+    batches_cache = cached_get_all_records(batches_sheet)
     for idx, r in tasks:
-        title, action_text = format_task_row_enriched(r)
+        title, action_text = format_task_row_enriched(r, batches_cache=batches_cache)
         text = f"🧀 {title}\n— {action_text}"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done", callback_data=f"done:{idx}")]])
         await update.message.reply_text(text, reply_markup=kb)
 
 async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
     try:
-        rows = actions_sheet.get_all_records()
+        rows = cached_get_all_records(actions_sheet)
     except Exception:
         return
     today = today_iso()
@@ -387,10 +427,11 @@ async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
     if not tasks:
         return
     subs = get_active_subscribers()
+    batches_cache = cached_get_all_records(batches_sheet)
     for s in subs:
         cid = s["ChatID"]
         for idx, r in tasks:
-            title, action_text = format_task_row_enriched(r)
+            title, action_text = format_task_row_enriched(r, batches_cache=batches_cache)
             text = f"🧀 {title}\n— {action_text}"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done", callback_data=f"done:{idx}")]])
             try:
@@ -414,6 +455,7 @@ async def callback_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         actions_sheet.update_cell(row_idx, 4, "YES")   # Done col
         actions_sheet.update_cell(row_idx, 5, who)    # Who col
         actions_sheet.update_cell(row_idx, 6, ts)     # Timestamp col
+        invalidate_sheet_cache(actions_sheet)
     except Exception:
         logger.exception("Failed to write done to Actions")
         await query.edit_message_text("Ошибка записи статуса.")
@@ -427,7 +469,7 @@ async def callback_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action_text = row_vals[2] if len(row_vals) >= 3 else ""
     # try get batch info for title
     try:
-        batch_recs = batches_sheet.get_all_records()
+        batch_recs = cached_get_all_records(batches_sheet)
     except Exception:
         batch_recs = []
     title = f"Партия {batchid}"
@@ -493,7 +535,7 @@ def build_app():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CallbackQueryHandler(callback_done, pattern="^done:"))
 
-        # schedule daily job at 09:00 in Podgorica
+    # schedule daily job at 09:00 in Podgorica
     tz = ZoneInfo(PODGORICA_TZ)
     run_time = dtime(9, 0)
 
