@@ -62,7 +62,7 @@ subs_sheet = wb.worksheet("Subscribers")
 # ---------- Simple sheet read-cache ----------
 # cache structure: { sheet_title: (timestamp, data) }
 SHEET_RECORDS_CACHE = {}
-CACHE_TTL_SECONDS = 5  # small TTL to avoid bursts, adjust if needed
+CACHE_TTL_SECONDS = 60  # increased TTL to 60s to avoid Read-request bursts causing 429
 
 def cached_get_all_records(sheet_obj, ttl_seconds=CACHE_TTL_SECONDS):
     title = sheet_obj.title
@@ -452,7 +452,7 @@ async def callback_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     who = user.username or (user.first_name or "")
     ts = now_iso()
     try:
-        actions_sheet.update_cell(row_idx, 4, "YES")   # Done col
+        actions_sheet.update_cell(row_idx, 4, "TRUE")   # Done col -> TRUE now
         actions_sheet.update_cell(row_idx, 5, who)    # Who col
         actions_sheet.update_cell(row_idx, 6, ts)     # Timestamp col
         invalidate_sheet_cache(actions_sheet)
@@ -529,11 +529,19 @@ def build_app():
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("check", lambda update, context: ContextTypes.DEFAULT_TYPE))  # placeholder, replaced below
     app.add_handler(addbatch_conv)
     app.add_handler(sale_conv)
     app.add_handler(MessageHandler(filters.Regex("^Задания на сегодня$"), cmd_today))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CallbackQueryHandler(callback_done, pattern="^done:"))
+
+    # replace placeholder: proper /check handler
+    async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Запускаю проверку и рассылку заданий (тест)...")
+        await send_daily_notifications(context)
+        await update.message.reply_text("Готово. Проверьте сообщения у подписчиков (и у себя).")
+    app.add_handler(CommandHandler("check", cmd_check))
 
     # schedule daily job at 09:00 in Podgorica
     tz = ZoneInfo(PODGORICA_TZ)
@@ -556,5 +564,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
