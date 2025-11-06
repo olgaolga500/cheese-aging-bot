@@ -140,7 +140,16 @@ def get_active_subscribers():
     return out
 
 def main_menu_keyboard():
-    return ReplyKeyboardMarkup([["Сварить сыр", "Списать сыр"], ["Задания на сегодня"]], resize_keyboard=True)
+    # removed "Задания на сегодня" button as requested
+    return ReplyKeyboardMarkup([["Сварить сыр", "Списать сыр"]], resize_keyboard=True)
+
+def is_done_value(v):
+    """Return True if v represents a done/true value (handles strings like 'TRUE','Yes', True, etc.)."""
+    if v is None:
+        return False
+    sval = str(v).strip().lower()
+    return sval in ("true", "yes", "1", "y", "done")
+
 # -------------------------------------
 
 # ---------- Handlers ----------
@@ -402,7 +411,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = today_iso()
     tasks = []
     for idx, r in enumerate(rows, start=2):
-        if str(r.get("ActionDate")) == today and not r.get("Done"):
+        if str(r.get("ActionDate")) == today and not is_done_value(r.get("Done")):
             tasks.append((idx, r))
     if not tasks:
         await update.message.reply_text("На сегодня нет задач.", reply_markup=main_menu_keyboard())
@@ -422,14 +431,18 @@ async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
     today = today_iso()
     tasks = []
     for idx, r in enumerate(rows, start=2):
-        if str(r.get("ActionDate")) == today and not r.get("Done"):
+        if str(r.get("ActionDate")) == today and not is_done_value(r.get("Done")):
             tasks.append((idx, r))
     if not tasks:
+        logger.debug("No tasks for today")
         return
     subs = get_active_subscribers()
     batches_cache = cached_get_all_records(batches_sheet)
     for s in subs:
-        cid = s["ChatID"]
+        cid = s.get("ChatID")
+        if not isinstance(cid, int):
+            # skip invalid ChatID
+            continue
         for idx, r in tasks:
             title, action_text = format_task_row_enriched(r, batches_cache=batches_cache)
             text = f"🧀 {title}\n— {action_text}"
@@ -487,6 +500,7 @@ async def callback_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs = get_active_subscribers()
     for s in subs:
         try:
+            # notify all subscribers (including performer). If you prefer to exclude performer, change here.
             await context.bot.send_message(chat_id=s["ChatID"], text=broadcast)
         except Exception:
             logger.exception("Failed to broadcast done to " + str(s.get("ChatID")))
@@ -531,7 +545,7 @@ def build_app():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(addbatch_conv)
     app.add_handler(sale_conv)
-    app.add_handler(MessageHandler(filters.Regex("^Задания на сегодня$"), cmd_today))
+    # removed the MessageHandler for "Задания на сегодня" (button was removed)
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CallbackQueryHandler(callback_done, pattern="^done:"))
 
@@ -544,6 +558,7 @@ def build_app():
 
     # schedule daily job at 09:00 in Podgorica
     tz = ZoneInfo(PODGORICA_TZ)
+    # put tzinfo into time object (python-telegram-bot expects tzinfo inside time)
     run_time = dtime(9, 0, tzinfo=tz)
 
     # PTB v20+ expects tzinfo inside time(...) and doesn't accept timezone= kw
