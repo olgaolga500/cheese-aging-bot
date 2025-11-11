@@ -382,18 +382,36 @@ async def sale_by_head_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     batchid = context.user_data.get("batchid")
     sdate = today_iso()
     who = update.effective_user.username or (update.effective_user.full_name or "")
-    try:
+        try:
         sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
         invalidate_sheet_cache(sales_sheet)
-        invalidate_sheet_cache(batches_sheet)  # because Sales script may change Remaining
     except Exception:
         logger.exception("Failed to append sale")
         await update.message.reply_text("Ошибка при записи в Sales.", reply_markup=main_menu_keyboard())
         context.user_data.clear()
         return ConversationHandler.END
-    await update.message.reply_text(f"Записано в Sales: Batch {batchid} — {qty} шт.", reply_markup=main_menu_keyboard())
+
+    # уменьшаем остаток в Batches
+    rows = cached_get_all_records(batches_sheet)
+    for idx, r in enumerate(rows, start=2):  # первая строка — заголовки
+        if str(r.get("BatchID")) == str(batchid):
+            try:
+                rem = int(r.get("Remaining") or 0)
+            except:
+                rem = 0
+            new_rem = max(rem - qty, 0)
+            batches_sheet.update_cell(idx, 6, new_rem)  # колонка Remaining
+            break
+
+    invalidate_sheet_cache(batches_sheet)
+
+    await update.message.reply_text(
+        f"Записано в Sales: Batch {batchid} — {qty} шт.",
+        reply_markup=main_menu_keyboard()
+    )
     context.user_data.clear()
     return ConversationHandler.END
+
 
 async def sale_choose_cheese(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cheese = update.message.text.strip()
@@ -470,15 +488,37 @@ async def sale_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     batchid = context.user_data.get("batchid")
     sdate = today_iso()
     who = update.effective_user.username or (update.effective_user.full_name or "")
-    try:
+        try:
         sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
         invalidate_sheet_cache(sales_sheet)
-        invalidate_sheet_cache(batches_sheet)
     except Exception:
         logger.exception("Failed to append sale")
         await update.message.reply_text("Ошибка при записи в Sales.", reply_markup=main_menu_keyboard())
         context.user_data.clear()
         return ConversationHandler.END
+
+    # уменьшаем остаток в Batches
+    rows = cached_get_all_records(batches_sheet)
+    for idx, r in enumerate(rows, start=2):  # первая строка — заголовки
+        if str(r.get("BatchID")) == str(batchid):
+            try:
+                rem = int(r.get("Remaining") or 0)
+            except:
+                rem = 0
+            new_rem = max(rem - qty, 0)
+            batches_sheet.update_cell(idx, 6, new_rem)  # колонка Remaining
+            break
+
+    invalidate_sheet_cache(batches_sheet)
+
+    await update.message.reply_text(
+        f"Записано в Sales: Batch {batchid} — {qty} шт.",
+        reply_markup=main_menu_keyboard()
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
   
     await update.message.reply_text(f"Записано в Sales: Batch {batchid} — {qty} шт.", reply_markup=main_menu_keyboard())
     context.user_data.clear()
