@@ -412,7 +412,6 @@ async def sale_by_head_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-
 async def sale_choose_cheese(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cheese = update.message.text.strip()
     context.user_data["cheese"] = cheese
@@ -438,32 +437,6 @@ async def sale_choose_milk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Нет партий с остатком > 0.", reply_markup=main_menu_keyboard())
         return ConversationHandler.END
 
-    kb = [[f'Batch {c.get("BatchID")} — осталось {c.get("Remaining")}'] for c in candidates]
-    await update.message.reply_text("Выберите партию:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-    return SALE_PICK_BATCH
-
-
-async def sale_choose_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    dt = update.message.text.strip()
-    try:
-        datetime.strptime(dt, "%Y-%m-%d")
-    except Exception:
-        await update.message.reply_text("Неверный формат даты. Используй YYYY-MM-DD.")
-        return SALE_DATE
-    context.user_data["date"] = dt
-    rows = cached_get_all_records(batches_sheet)
-    candidates = []
-    for r in rows:
-        if str(r.get("Cheese")) == str(context.user_data["cheese"]) and str(r.get("MilkType")) == str(context.user_data["milk"]) and str(r.get("Date")) == dt:
-            try:
-                rem = int(r.get("Remaining") or 0)
-            except Exception:
-                rem = 0
-            if rem > 0:
-                candidates.append(r)
-    if not candidates:
-        await update.message.reply_text("Не найдено партий по этим параметрам с остатком >0.", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
     kb = [[f'Batch {c.get("BatchID")} — осталось {c.get("Remaining")}'] for c in candidates]
     await update.message.reply_text("Выберите партию:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     return SALE_PICK_BATCH
@@ -517,8 +490,6 @@ async def sale_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data.clear()
     return ConversationHandler.END
-
-
   
     await update.message.reply_text(f"Записано в Sales: Batch {batchid} — {qty} шт.", reply_markup=main_menu_keyboard())
     context.user_data.clear()
@@ -676,7 +647,6 @@ def build_app():
             SALE_HEAD_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_by_head_qty)],
             SALE_CHEESE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_choose_cheese)],
             SALE_MILK: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_choose_milk)],
-            SALE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_choose_date)],
             SALE_PICK_BATCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_pick_batch)],
             SALE_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_qty)],
         },
