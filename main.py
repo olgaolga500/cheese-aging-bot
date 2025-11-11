@@ -386,20 +386,6 @@ async def sale_by_head_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
         invalidate_sheet_cache(sales_sheet)
         invalidate_sheet_cache(batches_sheet)  # because Sales script may change Remaining
-        # --- уменьшить Remaining ---
-        rows = cached_get_all_records(batches_sheet)
-        col = batches_sheet.col_values(1)
-        for idx, r in enumerate(rows, start=2):
-            if str(r.get("BatchID")) == str(batchid):
-                try:
-                    rem = int(r.get("Remaining") or 0)
-                except:
-                    rem = 0
-                new_rem = max(rem - qty, 0)
-                batches_sheet.update_cell(idx, 6, new_rem)  # Remaining = column 6
-                break
-        invalidate_sheet_cache(batches_sheet)
-    
     except Exception:
         logger.exception("Failed to append sale")
         await update.message.reply_text("Ошибка при записи в Sales.", reply_markup=main_menu_keyboard())
@@ -418,28 +404,8 @@ async def sale_choose_cheese(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def sale_choose_milk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["milk"] = update.message.text.strip()
-   rows = cached_get_all_records(batches_sheet)
-    cheese = context.user_data["cheese"]
-    milk = context.user_data["milk"]
-
-    candidates = []
-    for r in rows:
-        if str(r.get("Cheese")) == cheese and str(r.get("MilkType")) == milk:
-            try:
-                rem = int(r.get("Remaining") or 0)
-            except:
-                rem = 0
-            if rem > 0:
-                candidates.append(r)
-
-    if not candidates:
-        await update.message.reply_text("Нет партий с остатком > 0.", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
-
-    kb = [[f'Партия {c.get("BatchID")} — осталось {c.get("Remaining")}'] for c in candidates]
-    await update.message.reply_text("Выберите партию:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-    return SALE_PICK_BATCH
-
+    await update.message.reply_text("Введите дату партии (ISO, например 2025-09-03):")
+    return SALE_DATE
 
 async def sale_choose_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dt = update.message.text.strip()
