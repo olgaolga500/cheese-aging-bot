@@ -382,7 +382,7 @@ async def sale_by_head_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     batchid = context.user_data.get("batchid")
     sdate = today_iso()
     who = update.effective_user.username or (update.effective_user.full_name or "")
-        try:
+         try:
         sales_sheet.append_row([sdate, batchid, qty, "", who, now_iso()])
         invalidate_sheet_cache(sales_sheet)
     except Exception:
